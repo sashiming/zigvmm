@@ -210,7 +210,7 @@ pub const KVM_GET_SREGS: u32 = linux.IOCTL.IOR(KVMIO, 0x83, KvmSregs);
 pub const KVM_SET_SREGS: u32 = linux.IOCTL.IOW(KVMIO, 0x84, KvmSregs);
 
 const FileError = error{FileOpenFailed};
-const SyscallError = error{IoctlFailed};
+const IoctlError = error{ GetAPIVersion, CreateVM, SetUserMemoryRegion, CreateVcpu, GetVcpuMmapSize, GetSregs, SetSregs, GetRegs, SetRegs, KvmRun };
 
 fn open(path: [*:0]const u8, flags: linux.O, perm: linux.mode_t) isize {
     const fd = linux.open(path, flags, perm);
@@ -235,7 +235,7 @@ pub const control = struct {
     pub fn get_api_version(fd: kvm_fd_t) !usize {
         const version = ioctl(fd, KVM_GET_API_VERSION, 0);
         if (version < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.GetAPIVersion;
         }
         return @intCast(version);
     }
@@ -243,7 +243,7 @@ pub const control = struct {
     pub fn create_vm(fd: kvm_fd_t) !vm_fd_t {
         const vm_fd = ioctl(fd, KVM_CREATE_VM, 0);
         if (vm_fd < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.CreateVM;
         }
         return @intCast(vm_fd);
     }
@@ -251,14 +251,14 @@ pub const control = struct {
     pub fn set_user_memory_region(fd: vm_fd_t, region: *const KvmUserspaceMemoryRegion) !void {
         const ret = ioctl(fd, KVM_SET_USER_MEMORY_REGION, @intFromPtr(region));
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.SetUserMemoryRegion;
         }
     }
 
     pub fn create_vcpu(fd: vm_fd_t) !vcpu_fd_t {
         const vcpu_fd = ioctl(fd, KVM_CREATE_VCPU, 0);
         if (vcpu_fd < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.CreateVcpu;
         }
         return @intCast(vcpu_fd);
     }
@@ -266,7 +266,7 @@ pub const control = struct {
     pub fn get_vcpu_mmap_size(fd: kvm_fd_t) !usize {
         const size = ioctl(fd, KVM_GET_VCPU_MMAP_SIZE, 0);
         if (size < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.GetVcpuMmapSize;
         }
         return @intCast(size);
     }
@@ -274,35 +274,35 @@ pub const control = struct {
     pub fn get_sregs(fd: vcpu_fd_t, sregs: *KvmSregs) !void {
         const ret = ioctl(fd, KVM_GET_SREGS, @intFromPtr(sregs));
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.GetSregs;
         }
     }
 
     pub fn set_sregs(fd: vcpu_fd_t, sregs: *const KvmSregs) !void {
         const ret = ioctl(fd, KVM_SET_SREGS, @intFromPtr(sregs));
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.SetSregs;
         }
     }
 
     pub fn get_regs(fd: vcpu_fd_t, regs: *KvmRegs) !void {
         const ret = ioctl(fd, KVM_GET_REGS, @intFromPtr(regs));
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.GetRegs;
         }
     }
 
     pub fn set_regs(fd: vcpu_fd_t, regs: *const KvmRegs) !void {
         const ret = ioctl(fd, KVM_SET_REGS, @intFromPtr(regs));
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.SetRegs;
         }
     }
 
     pub fn kvm_run(fd: vcpu_fd_t) !void {
         const ret = ioctl(fd, KVM_RUN, 0);
         if (ret < 0) {
-            return SyscallError.IoctlFailed;
+            return IoctlError.KvmRun;
         }
     }
 };

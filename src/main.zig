@@ -1,18 +1,13 @@
 const std = @import("std");
 const linux = std.os.linux;
 const kvm = @import("kvm.zig");
+const longmode = @import("longmode.zig");
 const allocator = std.heap.page_allocator;
 
-const MEMORY_SIZE: usize = 0x100000; // 1 MiB
+pub const MEMORY_SIZE: usize = 0x400000; // 4 MiB
+pub const START_ADDR: usize = 0x10000; // guest code will be loaded at this address
 
-// const guest_code = [_]u8{
-//     // simple addition and halt
-//     0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-//     0xbb, 0x02, 0x00, 0x00, 0x00, // mov ebx, 2
-//     0x01, 0xd8, // add eax, ebx
-//     0xf4, // hlt
-// };
-
+// show "Hello KVM!"
 const guest_code = [_]u8{ 0xb0, 0x48, 0xe6, 0x01, 0xb0, 0x65, 0xe6, 0x01, 0xb0, 0x6c, 0xe6, 0x01, 0xb0, 0x6c, 0xe6, 0x01, 0xb0, 0x6f, 0xe6, 0x01, 0xb0, 0x20, 0xe6, 0x01, 0xb0, 0x4b, 0xe6, 0x01, 0xb0, 0x56, 0xe6, 0x01, 0xb0, 0x4d, 0xe6, 0x01, 0xb0, 0x21, 0xe6, 0x01, 0xf4 };
 
 pub fn main() !void {
@@ -30,9 +25,10 @@ pub fn main() !void {
     // allocate memory for VM
     const vm_memory = try allocator.alloc(u8, MEMORY_SIZE);
     defer allocator.free(vm_memory);
+    @memset(vm_memory, 0);
 
     // copy guest code to VM memory
-    @memcpy(vm_memory[0..guest_code.len], &guest_code);
+    @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code.len], &guest_code);
 
     // ioctl(kvm_fd, KVM_SET_USER_MEMORY_REGION, &region)
     const region = kvm.KvmUserspaceMemoryRegion{
@@ -63,24 +59,22 @@ pub fn main() !void {
     // initialize sregs
     var sregs = kvm.KvmSregs.new();
     try kvm.control.get_sregs(vcpu_fd, &sregs);
-    sregs.cs.base = 0;
-    sregs.cs.selector = 0;
+    // setup page tables, segments and control registers for long mode
+    longmode.setup_longmode(vm_memory, &sregs);
     try kvm.control.set_sregs(vcpu_fd, &sregs);
 
     // initialize regs
     var regs = kvm.KvmRegs.new();
-    regs.rip = 0x0; // entry point
+    regs.rip = 0x0; // entry point (GVA)
     regs.rflags = 0x2; // reserved bit must be 1
     try kvm.control.set_regs(vcpu_fd, &regs);
 
     // run the VM
-    var is_running: u8 = 1;
-    while (is_running > 0) {
+    while (true) {
         try kvm.control.kvm_run(vcpu_fd);
         switch (vcpu_run.exit_reason) {
             kvm.KVM_EXIT_HLT => {
                 std.debug.print("\nGuest halted\n", .{});
-                is_running = 0;
                 break;
             },
             kvm.KVM_EXIT_IO => {
@@ -94,7 +88,6 @@ pub fn main() !void {
             else => {
                 std.debug.print("Unexpected exit reason: {d}\n", .{vcpu_run.exit_reason});
                 std.debug.print("Hardware exit reason: {d}\n", .{vcpu_run.exit.hw.hardware_exit_reason});
-                is_running = 0;
                 break;
             },
         }
