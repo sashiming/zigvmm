@@ -64,7 +64,6 @@ fn setup_segments(vm_memory: []u8, sregs: *kvm.KvmSregs) void {
     };
 
     // initialize GDT on guest memory
-    // 4 byte formatで書く!
     gdt[0] = 0;
     gdt[1] = gdt_struct_to_u64(gdt1);
     gdt[2] = gdt_struct_to_u64(gdt2);
