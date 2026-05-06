@@ -2,13 +2,14 @@ const std = @import("std");
 const linux = std.os.linux;
 const kvm = @import("kvm.zig");
 const longmode = @import("longmode.zig");
+const protectedmode = @import("protectedmode.zig");
 const guestcodes = @import("guestcodes.zig");
 const allocator = std.heap.page_allocator;
 
 pub const MEMORY_SIZE: usize = 0x400000; // 4 MiB
 pub const START_ADDR: usize = 0x10000; // guest code will be loaded at this GPA
 
-pub const guest_code = guestcodes.hello_kvm;
+pub const guest_code = guestcodes.protectedmode;
 
 pub fn main() !void {
     // open("/dev/kvm", O_RDWR)
@@ -60,12 +61,14 @@ pub fn main() !void {
     var sregs = kvm.KvmSregs.new();
     try kvm.control.get_sregs(vcpu_fd, &sregs);
     // setup page tables, segments and control registers for long mode
-    longmode.setup_longmode(vm_memory, &sregs);
+    // longmode.setup_longmode(vm_memory, &sregs);
+    protectedmode.setup_protectedmode(vm_memory, &sregs);
     try kvm.control.set_sregs(vcpu_fd, &sregs);
 
     // initialize regs
     var regs = kvm.KvmRegs.new();
-    regs.rip = 0x0; // entry point (GVA)
+    // regs.rip = 0x0; // entry point
+    regs.rip = START_ADDR; // entry point
     regs.rflags = 0x2; // reserved bit must be 1
     try kvm.control.set_regs(vcpu_fd, &regs);
 
@@ -93,13 +96,15 @@ pub fn main() !void {
                     const base: [*]u8 = @ptrCast(vcpu_run);
                     const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
                     base[offset] = 0x20; // THR empty
+                } else if (vcpu_run.exit.io.port >= 0x3f8 and vcpu_run.exit.io.port <= 0x3ff) {
+                    std.debug.print("I/O port {x} accessed\n", .{vcpu_run.exit.io.port});
                 } else {
                     std.debug.print("Unexpected I/O port: {x}\n", .{vcpu_run.exit.io.port});
                 }
             },
             else => {
                 std.debug.print("Unexpected exit reason: {d}\n", .{vcpu_run.exit_reason});
-                std.debug.print("Hardware exit reason: {d}\n", .{vcpu_run.exit.hw.hardware_exit_reason});
+                std.debug.print("Hardware exit reason: 0x{x}\n", .{vcpu_run.exit.hw.hardware_exit_reason});
                 break;
             },
         }
