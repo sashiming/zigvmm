@@ -2,22 +2,13 @@ const std = @import("std");
 const linux = std.os.linux;
 const kvm = @import("kvm.zig");
 const longmode = @import("longmode.zig");
+const guestcodes = @import("guestcodes.zig");
 const allocator = std.heap.page_allocator;
 
 pub const MEMORY_SIZE: usize = 0x400000; // 4 MiB
 pub const START_ADDR: usize = 0x10000; // guest code will be loaded at this GPA
 
-// show "Hello KVM!"
-const guest_code = [_]u8{ 0xb0, 0x48, 0xe6, 0x01, 0xb0, 0x65, 0xe6, 0x01, 0xb0, 0x6c, 0xe6, 0x01, 0xb0, 0x6c, 0xe6, 0x01, 0xb0, 0x6f, 0xe6, 0x01, 0xb0, 0x20, 0xe6, 0x01, 0xb0, 0x4b, 0xe6, 0x01, 0xb0, 0x56, 0xe6, 0x01, 0xb0, 0x4d, 0xe6, 0x01, 0xb0, 0x21, 0xe6, 0x01, 0xf4 };
-// guest code for testing long mode
-const guest_code2 = [_]u8{
-    0x48, 0xb8, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, // mov rax, 'ABCDEFGH'
-    0x48, 0xc7, 0xc1, 0x08, 0x00, 0x00, 0x00, // mov rcx, 8
-    0xe6, 0x01, // out 0x01, al
-    0x48, 0xc1, 0xe8, 0x08, // shr rax, 8
-    0xe2, 0xf8, // loop to out 8 bytes
-    0xf4, // hlt
-};
+pub const guest_code = guestcodes.hello_kvm;
 
 pub fn main() !void {
     // open("/dev/kvm", O_RDWR)
@@ -37,7 +28,7 @@ pub fn main() !void {
     @memset(vm_memory, 0);
 
     // copy guest code to VM memory
-    @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code2.len], &guest_code2);
+    @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code.len], &guest_code);
 
     // ioctl(kvm_fd, KVM_SET_USER_MEMORY_REGION, &region)
     const region = kvm.KvmUserspaceMemoryRegion{
@@ -92,6 +83,18 @@ pub fn main() !void {
                     const base: [*]const u8 = @ptrCast(vcpu_run);
                     const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
                     std.debug.print("{c}", .{base[offset]});
+                } else if (vcpu_run.exit.io.port == 0x3f8 and vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_OUT) {
+                    // UART COM1 THR (Transmitter Holding Register)
+                    const base: [*]const u8 = @ptrCast(vcpu_run);
+                    const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
+                    std.debug.print("{c}", .{base[offset]});
+                } else if (vcpu_run.exit.io.port == 0x3fd and vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
+                    // UART COM1 LSR (Line Status Register)
+                    const base: [*]u8 = @ptrCast(vcpu_run);
+                    const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
+                    base[offset] = 0x20; // THR empty
+                } else {
+                    std.debug.print("Unexpected I/O port: {x}\n", .{vcpu_run.exit.io.port});
                 }
             },
             else => {
