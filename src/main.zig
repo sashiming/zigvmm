@@ -4,9 +4,11 @@ const kvm = @import("kvm.zig");
 const longmode = @import("longmode.zig");
 const protectedmode = @import("protectedmode.zig");
 const guestcodes = @import("guestcodes.zig");
+const elf_loader = @import("elf_loader.zig");
+const bda = @import("bda.zig");
 const allocator = std.heap.page_allocator;
 
-pub const MEMORY_SIZE: usize = 0x400000; // 4 MiB
+pub const MEMORY_SIZE: usize = 0x1000000; // 16 MiB
 pub const START_ADDR: usize = 0x10000; // guest code will be loaded at this GPA
 
 pub const guest_code = guestcodes.protectedmode;
@@ -28,8 +30,13 @@ pub fn main() !void {
     defer allocator.free(vm_memory);
     @memset(vm_memory, 0);
 
+    // load kernel code to VM memory
+    const entrypoint = try elf_loader.load_elf_file("xv6_kernel", vm_memory);
+
+    bda.init_bda(vm_memory);
+
     // copy guest code to VM memory
-    @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code.len], &guest_code);
+    // @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code.len], &guest_code);
 
     // ioctl(kvm_fd, KVM_SET_USER_MEMORY_REGION, &region)
     const region = kvm.KvmUserspaceMemoryRegion{
@@ -40,6 +47,10 @@ pub fn main() !void {
         .userspace_addr = @intFromPtr(vm_memory.ptr),
     };
     try kvm.control.set_user_memory_region(vm_fd, &region);
+
+    try kvm.control.create_irqchip(vm_fd);
+    const pit_config: kvm.KvmPitConfig = .{ .flags = 0, .padding = [_]u32{0} ** 15 };
+    try kvm.control.create_pit2(vm_fd, &pit_config);
 
     // create VCPU
     const vcpu_fd = try kvm.control.create_vcpu(vm_fd);
@@ -68,7 +79,7 @@ pub fn main() !void {
     // initialize regs
     var regs = kvm.KvmRegs.new();
     // regs.rip = 0x0; // entry point
-    regs.rip = START_ADDR; // entry point
+    regs.rip = entrypoint; // entry point
     regs.rflags = 0x2; // reserved bit must be 1
     try kvm.control.set_regs(vcpu_fd, &regs);
 
@@ -97,14 +108,40 @@ pub fn main() !void {
                     const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
                     base[offset] = 0x20; // THR empty
                 } else if (vcpu_run.exit.io.port >= 0x3f8 and vcpu_run.exit.io.port <= 0x3ff) {
-                    std.debug.print("I/O port {x} accessed\n", .{vcpu_run.exit.io.port});
+                    // std.debug.print("COM1 I/O port {x} accessed\n", .{vcpu_run.exit.io.port});
+                } else if (vcpu_run.exit.io.port == 0x1f0) {
+                    // IDE data register
+                    if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_OUT) {
+                        const base: [*]const u8 = @ptrCast(vcpu_run);
+                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
+                        std.debug.print("IDE data OUT: {x}\n", .{base[offset]});
+                    } else if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
+                        const base: [*]u8 = @ptrCast(vcpu_run);
+                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
+                        base[offset] = 0xAB; // dummy data
+                        std.debug.print("IDE data IN: 0xAB\n", .{});
+                    }
+                } else if (vcpu_run.exit.io.port == 0x3d4 or vcpu_run.exit.io.port == 0x3d5) {
+                    std.debug.print("\n", .{});
+                    if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
+                        const base: [*]u8 = @ptrCast(vcpu_run);
+                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
+                        base[offset] = 0; // dummy data for VGA CRTC registers
+                    }
                 } else {
                     std.debug.print("Unexpected I/O port: {x}\n", .{vcpu_run.exit.io.port});
+                    try kvm.control.get_regs(vcpu_fd, &regs);
+                    std.debug.print("EIP: 0x{x}\n", .{regs.rip});
+                    std.debug.print("EDX: 0x{x}\n", .{regs.rdx});
+                    break;
                 }
             },
             else => {
                 std.debug.print("Unexpected exit reason: {d}\n", .{vcpu_run.exit_reason});
                 std.debug.print("Hardware exit reason: 0x{x}\n", .{vcpu_run.exit.hw.hardware_exit_reason});
+                try kvm.control.get_regs(vcpu_fd, &regs);
+                std.debug.print("EIP: 0x{x}\n", .{regs.rip});
+                std.debug.print("EDX: 0x{x}\n", .{regs.rdx});
                 break;
             },
         }

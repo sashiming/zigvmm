@@ -61,6 +61,11 @@ pub const KVM_EXIT_HLT: u32 = 5;
 pub const KVM_EXIT_IO_IN: u8 = 0;
 pub const KVM_EXIT_IO_OUT: u8 = 1;
 
+pub const KvmPitConfig = extern struct {
+    flags: u32,
+    padding: [15]u32,
+};
+
 pub const KvmSegment = extern struct {
     base: u64,
     limit: u32,
@@ -203,6 +208,8 @@ pub const KVM_CREATE_VM: u32 = linux.IOCTL.IO(KVMIO, 0x01);
 pub const KVM_GET_VCPU_MMAP_SIZE: u32 = linux.IOCTL.IO(KVMIO, 0x04);
 pub const KVM_CREATE_VCPU: u32 = linux.IOCTL.IO(KVMIO, 0x41);
 pub const KVM_SET_USER_MEMORY_REGION: u32 = linux.IOCTL.IOW(KVMIO, 0x46, KvmUserspaceMemoryRegion);
+pub const KVM_CREATE_IRQCHIP: u32 = linux.IOCTL.IO(KVMIO, 0x60);
+pub const KVM_CREATE_PIT2: u32 = linux.IOCTL.IOW(KVMIO, 0x77, KvmPitConfig);
 pub const KVM_RUN: u32 = linux.IOCTL.IO(KVMIO, 0x80);
 pub const KVM_GET_REGS: u32 = linux.IOCTL.IOR(KVMIO, 0x81, KvmRegs);
 pub const KVM_SET_REGS: u32 = linux.IOCTL.IOW(KVMIO, 0x82, KvmRegs);
@@ -210,7 +217,7 @@ pub const KVM_GET_SREGS: u32 = linux.IOCTL.IOR(KVMIO, 0x83, KvmSregs);
 pub const KVM_SET_SREGS: u32 = linux.IOCTL.IOW(KVMIO, 0x84, KvmSregs);
 
 const FileError = error{FileOpenFailed};
-const IoctlError = error{ GetAPIVersion, CreateVM, SetUserMemoryRegion, CreateVcpu, GetVcpuMmapSize, GetSregs, SetSregs, GetRegs, SetRegs, KvmRun };
+const IoctlError = error{ GetAPIVersion, CreateVM, SetUserMemoryRegion, CreateIRQChip, CreatePIT2, CreateVcpu, GetVcpuMmapSize, GetSregs, SetSregs, GetRegs, SetRegs, KvmRun };
 
 fn open(path: [*:0]const u8, flags: linux.O, perm: linux.mode_t) isize {
     const fd = linux.open(path, flags, perm);
@@ -252,6 +259,20 @@ pub const control = struct {
         const ret = ioctl(fd, KVM_SET_USER_MEMORY_REGION, @intFromPtr(region));
         if (ret < 0) {
             return IoctlError.SetUserMemoryRegion;
+        }
+    }
+
+    pub fn create_irqchip(fd: vm_fd_t) !void {
+        const ret = ioctl(fd, KVM_CREATE_IRQCHIP, 0);
+        if (ret < 0) {
+            return IoctlError.CreateIRQChip;
+        }
+    }
+
+    pub fn create_pit2(fd: vm_fd_t, config: *const KvmPitConfig) !void {
+        const ret = ioctl(fd, KVM_CREATE_PIT2, @intFromPtr(config));
+        if (ret < 0) {
+            return IoctlError.CreatePIT2;
         }
     }
 
