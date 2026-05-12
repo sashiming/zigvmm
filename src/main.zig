@@ -33,10 +33,22 @@ pub fn main() !void {
     // load kernel code to VM memory
     const entrypoint = try elf_loader.load_elf_file("xv6_kernel", vm_memory);
 
+    // initialize BDA and MP tables
     bda.init_bda(vm_memory);
 
     // copy guest code to VM memory
     // @memcpy(vm_memory[START_ADDR .. START_ADDR + guest_code.len], &guest_code);
+
+    // set the terminal to raw mode to handle UART input properly
+    const stdin_fd = linux.STDIN_FILENO;
+    const old_termios = try std.posix.tcgetattr(stdin_fd);
+    var new_termios = old_termios;
+    new_termios.lflag.ICANON = false;
+    new_termios.lflag.ECHO = false;
+    try std.posix.tcsetattr(stdin_fd, std.posix.TCSA.NOW, new_termios);
+    defer std.posix.tcsetattr(stdin_fd, std.posix.TCSA.NOW, old_termios) catch {};
+
+    _ = try std.Thread.spawn(.{}, kvm.io.stdin_reader, .{vm_fd});
 
     // ioctl(kvm_fd, KVM_SET_USER_MEMORY_REGION, &region)
     const region = kvm.KvmUserspaceMemoryRegion{
@@ -95,12 +107,11 @@ pub fn main() !void {
                 break;
             },
             kvm.KVM_EXIT_IO => {
-                kvm.io.handle_pio_exit(vm_fd, &vcpu_run.exit.io, @ptrCast(vcpu_run)) catch |err| {
+                kvm.io.handle_pio(vm_fd, &vcpu_run.exit.io, @ptrCast(vcpu_run)) catch |err| {
                     std.debug.print("Error handling I/O exit: {}\n", .{err});
                     std.debug.print("Unexpected I/O port: 0x{x}\n", .{vcpu_run.exit.io.port});
                     try kvm.control.get_regs(vcpu_fd, &regs);
                     std.debug.print("EIP: 0x{x}\n", .{regs.rip});
-                    std.debug.print("EDX: 0x{x}\n", .{regs.rdx});
                     break;
                 };
             },
@@ -109,7 +120,6 @@ pub fn main() !void {
                 std.debug.print("Hardware exit reason: 0x{x}\n", .{vcpu_run.exit.hw.hardware_exit_reason});
                 try kvm.control.get_regs(vcpu_fd, &regs);
                 std.debug.print("EIP: 0x{x}\n", .{regs.rip});
-                std.debug.print("EDX: 0x{x}\n", .{regs.rdx});
                 break;
             },
         }

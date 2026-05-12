@@ -351,6 +351,41 @@ pub const control = struct {
     }
 };
 
+const RingBuffer = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+    head: usize = 0,
+    mutex: std.Thread.Mutex = .{},
+
+    pub fn push(self: *@This(), data: u8) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.len >= self.buf.len) {
+            return error.RingBufferFull;
+        }
+        self.buf[(self.head + self.len) % self.buf.len] = data;
+        self.len += 1;
+    }
+
+    pub fn pop(self: *@This()) ?u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.len == 0) {
+            return null;
+        }
+        const data = self.buf[self.head];
+        self.head = (self.head + 1) % self.buf.len;
+        self.len -= 1;
+        return data;
+    }
+
+    pub fn is_empty(self: *@This()) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.len == 0;
+    }
+};
+
 const IDE_STATUS_BSY: u8 = 0x80;
 const IDE_STATUS_DRDY: u8 = 0x40;
 const IDE_STATUS_DF: u8 = 0x20;
@@ -361,6 +396,9 @@ const IDE_STATUS_IDX: u8 = 0x02;
 const IDE_STATUS_ERR: u8 = 0x01;
 
 pub const io = struct {
+    // for UART input buffering
+    var uart_input_queue: RingBuffer = .{};
+    // for IDE emulation
     var fs_file: ?std.fs.File = null;
     var ide_sector_buffer: [512]u8 = undefined;
     var ide_sector_buffer_offset: usize = 0;
@@ -411,7 +449,19 @@ pub const io = struct {
         try pulse_irq(vm_fd, 14);
     }
 
-    pub fn handle_pio_exit(vm_fd: vm_fd_t, exitio: *KvmExitIO, data_base: [*]u8) !void {
+    pub fn stdin_reader(vm_fd: vm_fd_t) !void {  // 別スレッドで実行して入力をバッファリング
+        var stdin_buf: [1024]u8 = undefined;
+        var buf: [1]u8 = undefined;
+        var stdin_fr = std.fs.File.stdin().reader(&stdin_buf);
+        var reader = &stdin_fr.interface;
+        while (true) {
+            try reader.readSliceAll(buf[0..1]);
+            try uart_input_queue.push(buf[0]);
+            try pulse_irq(vm_fd, 4); // COM1 UART IRQ
+        }
+    }
+
+    pub fn handle_pio(vm_fd: vm_fd_t, exitio: *KvmExitIO, data_base: [*]u8) !void {
         const ioport = exitio.port;
         const iodir = exitio.direction;
         const iosize = exitio.size;
@@ -419,12 +469,31 @@ pub const io = struct {
         const data_offset = exitio.data_offset;
         if (ioport >= 0x3f8 and ioport <= 0x3ff) {
             // COM1 UART
-            if (ioport == 0x3f8 and iodir == KVM_EXIT_IO_OUT) {
-                // THR (Transmitter Holding Register)
-                std.debug.print("{c}", .{data_base[data_offset]});
-            } else if (ioport == 0x3fd and iodir == KVM_EXIT_IO_IN) {
-                // LSR (Line Status Register)
-                data_base[data_offset] = 0x20; // THR empty
+            switch (ioport) {
+                0x3f8 => {
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        // RBR (Receiver Buffer Register)
+                        if (!uart_input_queue.is_empty()) {
+                            data_base[data_offset] = uart_input_queue.pop().?;
+                        } else {
+                            data_base[data_offset] = 0; // no data
+                        }
+                    } else {
+                        // THR (Transmitter Holding Register)
+                        std.debug.print("{c}", .{data_base[data_offset]});
+                    }
+                },
+                0x3fd => {
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        // LSR (Line Status Register)
+                        if (!uart_input_queue.is_empty()) {
+                            data_base[data_offset] = 0x21; // Data Ready
+                        } else {
+                            data_base[data_offset] = 0x20; // Empty
+                        }
+                    }
+                },
+                else => {}
             }
         } else if (ioport >= 0x3d4 and ioport <= 0x3d5) {
             // VGA
