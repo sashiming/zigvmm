@@ -8,7 +8,7 @@ const elf_loader = @import("elf_loader.zig");
 const bda = @import("bda.zig");
 const allocator = std.heap.page_allocator;
 
-pub const MEMORY_SIZE: usize = 0x1000000; // 16 MiB
+pub const MEMORY_SIZE: usize = 0x10000000; // 256 MiB
 pub const START_ADDR: usize = 0x10000; // guest code will be loaded at this GPA
 
 pub const guest_code = guestcodes.protectedmode;
@@ -83,6 +83,9 @@ pub fn main() !void {
     regs.rflags = 0x2; // reserved bit must be 1
     try kvm.control.set_regs(vcpu_fd, &regs);
 
+    try kvm.io.fs_init("xv6_fs.img");
+    defer kvm.io.fs_close();
+
     // run the VM
     while (true) {
         try kvm.control.kvm_run(vcpu_fd);
@@ -92,7 +95,8 @@ pub fn main() !void {
                 break;
             },
             kvm.KVM_EXIT_IO => {
-                kvm.io.handle_pio_exit(vm_fd, &vcpu_run.exit.io, @ptrCast(vcpu_run)) catch {
+                kvm.io.handle_pio_exit(vm_fd, &vcpu_run.exit.io, @ptrCast(vcpu_run)) catch |err| {
+                    std.debug.print("Error handling I/O exit: {}\n", .{err});
                     std.debug.print("Unexpected I/O port: 0x{x}\n", .{vcpu_run.exit.io.port});
                     try kvm.control.get_regs(vcpu_fd, &regs);
                     std.debug.print("EIP: 0x{x}\n", .{regs.rip});

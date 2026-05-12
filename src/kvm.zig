@@ -374,7 +374,7 @@ pub const io = struct {
     }
 
     pub fn fs_init(path: []const u8) !void {
-        fs_file = try std.fs.cwd().openFile(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
+        fs_file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
     }
 
     pub fn fs_close() void {
