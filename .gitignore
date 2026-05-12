@@ -1,4 +1,5 @@
 .vscode/
 .zig-cache/
 zig-out/
+xv6_fs.img.orig
 *.o

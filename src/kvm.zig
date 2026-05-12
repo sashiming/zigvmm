@@ -13,6 +13,14 @@ pub const KvmUserspaceMemoryRegion = extern struct {
     userspace_addr: u64,
 };
 
+pub const KvmExitIO = extern struct {
+    direction: u8,
+    size: u8,
+    port: u16,
+    count: u32,
+    data_offset: u64, // kvm_run 先頭からのオフセット
+};
+
 pub const KvmRun = extern struct {
     request_interrupt_window: u8,
     immediate_exit: u8,
@@ -28,13 +36,7 @@ pub const KvmRun = extern struct {
             hardware_exit_reason: u64,
         },
         /// KVM_EXIT_IO
-        io: extern struct {
-            direction: u8,
-            size: u8,
-            port: u16,
-            count: u32,
-            data_offset: u64, // kvm_run 先頭からのオフセット
-        },
+        io: KvmExitIO,
         /// union サイズを 256 bytes に固定 (C の char padding[256] に対応)
         _padding: [256]u8,
     },
@@ -57,6 +59,7 @@ pub const KVM_EXIT_UNKNOWN: u32 = 0;
 pub const KVM_EXIT_EXCEPTION: u32 = 1;
 pub const KVM_EXIT_IO: u32 = 2;
 pub const KVM_EXIT_HLT: u32 = 5;
+pub const KVM_EXIT_MMIO: u32 = 6;
 // io directions
 pub const KVM_EXIT_IO_IN: u8 = 0;
 pub const KVM_EXIT_IO_OUT: u8 = 1;
@@ -202,6 +205,14 @@ pub const KvmRegs = extern struct {
     }
 };
 
+pub const KvmIRQLevel = extern struct {
+    irq: extern union {
+        irq: u32,
+        status: i32,
+    },
+    level: u32,
+};
+
 const KVMIO: u8 = 0xae;
 pub const KVM_GET_API_VERSION: u32 = linux.IOCTL.IO(KVMIO, 0x00);
 pub const KVM_CREATE_VM: u32 = linux.IOCTL.IO(KVMIO, 0x01);
@@ -209,6 +220,7 @@ pub const KVM_GET_VCPU_MMAP_SIZE: u32 = linux.IOCTL.IO(KVMIO, 0x04);
 pub const KVM_CREATE_VCPU: u32 = linux.IOCTL.IO(KVMIO, 0x41);
 pub const KVM_SET_USER_MEMORY_REGION: u32 = linux.IOCTL.IOW(KVMIO, 0x46, KvmUserspaceMemoryRegion);
 pub const KVM_CREATE_IRQCHIP: u32 = linux.IOCTL.IO(KVMIO, 0x60);
+pub const KVM_IRQ_LINE: u32 = linux.IOCTL.IOW(KVMIO, 0x61, KvmIRQLevel);
 pub const KVM_CREATE_PIT2: u32 = linux.IOCTL.IOW(KVMIO, 0x77, KvmPitConfig);
 pub const KVM_RUN: u32 = linux.IOCTL.IO(KVMIO, 0x80);
 pub const KVM_GET_REGS: u32 = linux.IOCTL.IOR(KVMIO, 0x81, KvmRegs);
@@ -217,7 +229,7 @@ pub const KVM_GET_SREGS: u32 = linux.IOCTL.IOR(KVMIO, 0x83, KvmSregs);
 pub const KVM_SET_SREGS: u32 = linux.IOCTL.IOW(KVMIO, 0x84, KvmSregs);
 
 const FileError = error{FileOpenFailed};
-const IoctlError = error{ GetAPIVersion, CreateVM, SetUserMemoryRegion, CreateIRQChip, CreatePIT2, CreateVcpu, GetVcpuMmapSize, GetSregs, SetSregs, GetRegs, SetRegs, KvmRun };
+const IoctlError = error{ GetAPIVersion, CreateVM, SetUserMemoryRegion, CreateIRQChip, IRQLine, CreatePIT2, CreateVcpu, GetVcpuMmapSize, GetSregs, SetSregs, GetRegs, SetRegs, KvmRun };
 
 fn open(path: [*:0]const u8, flags: linux.O, perm: linux.mode_t) isize {
     const fd = linux.open(path, flags, perm);
@@ -266,6 +278,17 @@ pub const control = struct {
         const ret = ioctl(fd, KVM_CREATE_IRQCHIP, 0);
         if (ret < 0) {
             return IoctlError.CreateIRQChip;
+        }
+    }
+
+    pub fn irq_line(fd: vm_fd_t, irqnum: u32, level: u32) !void {
+        const irq_level: KvmIRQLevel = .{
+            .irq = .{ .irq = irqnum },
+            .level = level,
+        };
+        const ret = ioctl(fd, KVM_IRQ_LINE, @intFromPtr(&irq_level));
+        if (ret < 0) {
+            return IoctlError.IRQLine;
         }
     }
 
@@ -324,6 +347,209 @@ pub const control = struct {
         const ret = ioctl(fd, KVM_RUN, 0);
         if (ret < 0) {
             return IoctlError.KvmRun;
+        }
+    }
+};
+
+const IDE_STATUS_BSY: u8 = 0x80;
+const IDE_STATUS_DRDY: u8 = 0x40;
+const IDE_STATUS_DF: u8 = 0x20;
+const IDE_STATUS_DSC: u8 = 0x10;    // Seek Complete
+const IDE_STATUS_DRQ: u8 = 0x08;    // Data Request
+const IDE_STATUS_CORR: u8 = 0x04;
+const IDE_STATUS_IDX: u8 = 0x02;
+const IDE_STATUS_ERR: u8 = 0x01;
+
+pub const io = struct {
+    var fs_file: ?std.fs.File = null;
+    var ide_sector_buffer: [512]u8 = undefined;
+    var ide_sector_buffer_offset: usize = 0;
+    var ide_sector_number: usize = 0;
+    var ide_status: u8 = IDE_STATUS_DRDY;
+    var ide_lba: u32 = 0;
+
+    fn pulse_irq(fd: vm_fd_t, irqnum: u32) !void {
+        try control.irq_line(fd, irqnum, 1);
+        try control.irq_line(fd, irqnum, 0);
+    }
+
+    pub fn fs_init(path: []const u8) !void {
+        fs_file = try std.fs.cwd().openFile(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true });
+    }
+
+    pub fn fs_close() void {
+        if (fs_file) |file| {
+            file.close();
+        }
+    }
+
+    fn fs_read_sector(vm_fd: vm_fd_t) !void {
+        if (fs_file == null) return error.IDENoDisk;
+        var read_buf: [4096]u8 = undefined;
+        const offset = @as(u64, ide_lba) * 512;
+        var fr = fs_file.?.reader(&read_buf);
+        try fr.seekTo(offset);
+        var reader = &fr.interface;
+        try reader.readSliceAll(ide_sector_buffer[0..512]);
+        ide_sector_buffer_offset = 0;
+        ide_status = IDE_STATUS_DRDY | IDE_STATUS_DSC | IDE_STATUS_DRQ;
+        // activate IRQ 14
+        try pulse_irq(vm_fd, 14);
+    }
+
+    fn fs_write_sector(vm_fd: vm_fd_t) !void {
+        if (fs_file == null) return error.IDENoDisk;
+        var write_buf: [4096]u8 = undefined;
+        const offset = @as(u64, ide_lba) * 512;
+        var fw = fs_file.?.writer(&write_buf);
+        try fw.seekTo(offset);
+        var writer = &fw.interface;
+        try writer.writeAll(ide_sector_buffer[0..512]);
+        try writer.flush();
+        ide_status = IDE_STATUS_DRDY | IDE_STATUS_DSC;
+        // activate IRQ 14
+        try pulse_irq(vm_fd, 14);
+    }
+
+    pub fn handle_pio_exit(vm_fd: vm_fd_t, exitio: *KvmExitIO, data_base: [*]u8) !void {
+        const ioport = exitio.port;
+        const iodir = exitio.direction;
+        const iosize = exitio.size;
+        const iocount = exitio.count;
+        const data_offset = exitio.data_offset;
+        if (ioport >= 0x3f8 and ioport <= 0x3ff) {
+            // COM1 UART
+            if (ioport == 0x3f8 and iodir == KVM_EXIT_IO_OUT) {
+                // THR (Transmitter Holding Register)
+                std.debug.print("{c}", .{data_base[data_offset]});
+            } else if (ioport == 0x3fd and iodir == KVM_EXIT_IO_IN) {
+                // LSR (Line Status Register)
+                data_base[data_offset] = 0x20; // THR empty
+            }
+        } else if (ioport >= 0x3d4 and ioport <= 0x3d5) {
+            // VGA
+            if (iodir == KVM_EXIT_IO_IN) {
+                data_base[data_offset] = 0; // dummy data
+            }
+        } else if ((ioport >= 0x1f0 and ioport <= 0x1f7) or ioport == 0x3f6) {
+            // IDE
+            switch (ioport) {
+                0x1f0 => {
+                    // Data Register (r/w)
+                    const total: usize = @as(usize, iocount) * @as(usize, iosize);
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        // read
+                        for (0..total) |i| {
+                            data_base[data_offset + i] = ide_sector_buffer[ide_sector_buffer_offset];
+                            ide_sector_buffer_offset += 1;
+                            if (ide_sector_buffer_offset >= 512) {
+                                ide_sector_buffer_offset = 0;
+                                ide_status &= ~IDE_STATUS_DRQ; // clear DRQ
+                                break;
+                            }
+                        }
+                    } else {
+                        // write
+                        for (0..total) |i| {
+                            ide_sector_buffer[ide_sector_buffer_offset] = data_base[data_offset + i];
+                            ide_sector_buffer_offset += 1;
+                            if (ide_sector_buffer_offset >= 512) {
+                                ide_sector_buffer_offset = 0;
+                                ide_status &= ~IDE_STATUS_DRQ; // clear DRQ
+                                try fs_write_sector(vm_fd);    // write sector to disk and activate IRQ 14
+                                break;
+                            }
+                        }
+                    }
+                },
+                0x1f1 => {
+                    // Error Register (r) / Features Register (w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = 0; // no error
+                    } else {
+                        // ignore features
+                    }
+                },
+                0x1f2 => {
+                    // Sector Count Register (r/w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = @intCast(ide_sector_number);
+                    } else {
+                        ide_sector_number = @intCast(data_base[data_offset]);
+                    }
+                },
+                0x1f3 => {
+                    // LBA Low (r/w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = @truncate(ide_lba);
+                    } else {
+                        ide_lba &= 0xffffff00;
+                        ide_lba |= @as(u32, data_base[data_offset]);
+                    }
+                },
+                0x1f4 => {
+                    // LBA Mid (r/w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = @truncate(ide_lba >> 8);
+                    } else {
+                        ide_lba &= 0xffff00ff;
+                        ide_lba |= @as(u32, data_base[data_offset]) << 8;
+                    }
+                },
+                0x1f5 => {
+                    // LBA High (r/w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = @truncate(ide_lba >> 16);
+                    } else {
+                        ide_lba &= 0xff00ffff;
+                        ide_lba |= @as(u32, data_base[data_offset]) << 16;
+                    }
+                },
+                0x1f6 => {
+                    // Drive/Head Register (r/w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = 0; // master drive, LBA mode
+                    } else {
+                        const val: u8 = data_base[data_offset];
+                        if ((val >> 6) & 1 != 0) {  // LBA mode
+                            ide_lba &= 0x00ffffff;
+                            ide_lba |= @as(u32, val & 0xf) << 24;
+                        } else {
+                            // CHS mode
+                            return error.IDEUnsupportedCHSMode;
+                        }
+                    }
+                },
+                0x1f7 => {
+                    // Status Register (r) / Command Register (w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = ide_status;
+                    } else {
+                        const cmd: u8 = data_base[data_offset];
+                        if (cmd == 0x20) { // READ SECTORS
+                            try fs_read_sector(vm_fd);
+                        } else if (cmd == 0x30) { // WRITE SECTORS
+                            ide_sector_buffer_offset = 0;
+                            ide_status = IDE_STATUS_DRDY | IDE_STATUS_DSC | IDE_STATUS_DRQ;
+                        } else {
+                            return error.IDEUnsupportedCommand;
+                        }
+                    }
+                },
+                0x3f6 => {
+                    // Alt Status Register (r) / Device Control Register (w)
+                    if (iodir == KVM_EXIT_IO_IN) {
+                        data_base[data_offset] = 0; // no write-protect
+                    } else {
+                        // ignore device control writes
+                    }
+                },
+                else => {
+                    return error.IDEUnexpectedIoPort;
+                },
+            }
+        } else {
+            return error.UnexpectedIoPort;
         }
     }
 };

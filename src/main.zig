@@ -92,49 +92,13 @@ pub fn main() !void {
                 break;
             },
             kvm.KVM_EXIT_IO => {
-                if (vcpu_run.exit.io.port == 0x01 and vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_OUT) {
-                    // data_offset は kvm_run 先頭からのバイトオフセット
-                    const base: [*]const u8 = @ptrCast(vcpu_run);
-                    const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                    std.debug.print("{c}", .{base[offset]});
-                } else if (vcpu_run.exit.io.port == 0x3f8 and vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_OUT) {
-                    // UART COM1 THR (Transmitter Holding Register)
-                    const base: [*]const u8 = @ptrCast(vcpu_run);
-                    const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                    std.debug.print("{c}", .{base[offset]});
-                } else if (vcpu_run.exit.io.port == 0x3fd and vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
-                    // UART COM1 LSR (Line Status Register)
-                    const base: [*]u8 = @ptrCast(vcpu_run);
-                    const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                    base[offset] = 0x20; // THR empty
-                } else if (vcpu_run.exit.io.port >= 0x3f8 and vcpu_run.exit.io.port <= 0x3ff) {
-                    // std.debug.print("COM1 I/O port {x} accessed\n", .{vcpu_run.exit.io.port});
-                } else if (vcpu_run.exit.io.port == 0x1f0) {
-                    // IDE data register
-                    if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_OUT) {
-                        const base: [*]const u8 = @ptrCast(vcpu_run);
-                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                        std.debug.print("IDE data OUT: {x}\n", .{base[offset]});
-                    } else if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
-                        const base: [*]u8 = @ptrCast(vcpu_run);
-                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                        base[offset] = 0xAB; // dummy data
-                        std.debug.print("IDE data IN: 0xAB\n", .{});
-                    }
-                } else if (vcpu_run.exit.io.port == 0x3d4 or vcpu_run.exit.io.port == 0x3d5) {
-                    std.debug.print("\n", .{});
-                    if (vcpu_run.exit.io.direction == kvm.KVM_EXIT_IO_IN) {
-                        const base: [*]u8 = @ptrCast(vcpu_run);
-                        const offset: usize = @intCast(vcpu_run.exit.io.data_offset);
-                        base[offset] = 0; // dummy data for VGA CRTC registers
-                    }
-                } else {
-                    std.debug.print("Unexpected I/O port: {x}\n", .{vcpu_run.exit.io.port});
+                kvm.io.handle_pio_exit(vm_fd, &vcpu_run.exit.io, @ptrCast(vcpu_run)) catch {
+                    std.debug.print("Unexpected I/O port: 0x{x}\n", .{vcpu_run.exit.io.port});
                     try kvm.control.get_regs(vcpu_fd, &regs);
                     std.debug.print("EIP: 0x{x}\n", .{regs.rip});
                     std.debug.print("EDX: 0x{x}\n", .{regs.rdx});
                     break;
-                }
+                };
             },
             else => {
                 std.debug.print("Unexpected exit reason: {d}\n", .{vcpu_run.exit_reason});
